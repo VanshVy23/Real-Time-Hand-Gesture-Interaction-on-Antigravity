@@ -1,0 +1,199 @@
+
+<style>
+canvas { display: block; border-radius: var(--border-radius-lg); border: 0.5px solid var(--color-border-tertiary); background: #0a0a0f; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 1rem 0; }
+.fx-btn { padding: 6px 14px; font-size: 13px; border-radius: 20px; border: 1.5px solid var(--color-border-secondary); background: var(--color-background-primary); color: var(--color-text-primary); cursor: pointer; transition: all 0.15s; font-weight: 400; }
+.fx-btn.active { background: #534AB7; border-color: #534AB7; color: #fff; }
+.label { font-size: 12px; color: var(--color-text-secondary); margin-bottom: 6px; }
+</style>
+<h2 class="sr-only">Hand tracking visual effects simulator — move your mouse or touch to simulate hand movement</h2>
+<p class="label">Move your mouse (or finger) over the canvas to simulate hand tracking. Toggle effects below.</p>
+<div class="controls">
+  <button class="fx-btn active" data-fx="glow">Glow</button>
+  <button class="fx-btn active" data-fx="trails">Trails</button>
+  <button class="fx-btn active" data-fx="skeleton">Skeleton</button>
+  <button class="fx-btn" data-fx="particles">Particles</button>
+</div>
+<canvas id="c" width="700" height="380"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const effects = { glow: true, trails: true, skeleton: true, particles: false };
+document.querySelectorAll('.fx-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const fx = btn.dataset.fx;
+    effects[fx] = !effects[fx];
+    btn.classList.toggle('active', effects[fx]);
+  });
+});
+
+const FINGER_COUNT = 5;
+const KNUCKLE_COUNT = 4;
+const joints = [];
+
+function buildHand(cx, cy, scale) {
+  const pts = [];
+  const wrist = { x: cx, y: cy + 80 * scale };
+  pts.push(wrist);
+  const fingerAngles = [-40, -18, 0, 18, 36];
+  const fingerLengths = [[28,22,18,14],[32,28,22,16],[34,30,24,18],[30,26,20,14],[22,18,14,10]];
+  for (let f = 0; f < FINGER_COUNT; f++) {
+    const baseAngle = (fingerAngles[f] - 90) * Math.PI / 180;
+    let px = cx + Math.cos(baseAngle) * 30 * scale * (f === 0 ? 1.5 : 1);
+    let py = cy + 70 * scale + Math.sin(baseAngle) * 10 * scale;
+    pts.push({ x: px, y: py });
+    for (let k = 0; k < KNUCKLE_COUNT; k++) {
+      const angle = baseAngle - (f === 0 ? 0.2 : 0) * k;
+      px += Math.cos(angle) * fingerLengths[f][k] * scale;
+      py += Math.sin(angle) * fingerLengths[f][k] * scale;
+      pts.push({ x: px, y: py });
+    }
+  }
+  return pts;
+}
+
+let mouse = { x: W / 2, y: H / 2 };
+let smooth = { x: W / 2, y: H / 2 };
+const trail = [];
+const particles = [];
+
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - r.left;
+  mouse.y = e.clientY - r.top;
+});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  mouse.x = e.touches[0].clientX - r.left;
+  mouse.y = e.touches[0].clientY - r.top;
+}, { passive: false });
+
+const COLORS = {
+  glow: '#AFA9EC',
+  trail: '#534AB7',
+  skeleton: '#9FE1CB',
+  joint: '#EEEDFE',
+  particle: '#FAC775'
+};
+
+function spawnParticles(x, y) {
+  for (let i = 0; i < 2; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 2.5,
+      vy: -Math.random() * 2.5 - 0.5,
+      life: 1,
+      size: Math.random() * 3 + 1
+    });
+  }
+}
+
+function drawFrame() {
+  smooth.x += (mouse.x - smooth.x) * 0.12;
+  smooth.y += (mouse.y - smooth.y) * 0.12;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0a0a0f';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = smooth.x;
+  const cy = smooth.y;
+  const scale = 1.1;
+  const hand = buildHand(cx, cy, scale);
+
+  if (effects.trails) {
+    trail.push({ x: cx, y: cy, time: Date.now() });
+    while (trail.length > 60) trail.shift();
+    for (let i = 1; i < trail.length; i++) {
+      const t = i / trail.length;
+      ctx.beginPath();
+      ctx.moveTo(trail[i - 1].x, trail[i - 1].y);
+      ctx.lineTo(trail[i].x, trail[i].y);
+      ctx.strokeStyle = `rgba(83,74,183,${t * 0.6})`;
+      ctx.lineWidth = t * 4;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+  }
+
+  if (effects.glow) {
+    const grad = ctx.createRadialGradient(cx, cy + 30, 5, cx, cy + 30, 90);
+    grad.addColorStop(0, 'rgba(175,169,236,0.18)');
+    grad.addColorStop(1, 'rgba(83,74,183,0)');
+    ctx.beginPath();
+    ctx.arc(cx, cy + 30, 90, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+
+  if (effects.particles) {
+    spawnParticles(cx + (Math.random()-0.5)*60, cy + (Math.random()-0.5)*60);
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy; p.life -= 0.025;
+      if (p.life <= 0) { particles.splice(i, 1); continue; }
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(250,199,117,${p.life * 0.8})`;
+      ctx.fill();
+    }
+  }
+
+  if (effects.skeleton) {
+    const wrist = hand[0];
+    for (let f = 0; f < FINGER_COUNT; f++) {
+      const base = 1 + f * (KNUCKLE_COUNT + 1);
+      ctx.beginPath();
+      ctx.moveTo(wrist.x, wrist.y);
+      ctx.lineTo(hand[base].x, hand[base].y);
+      ctx.strokeStyle = 'rgba(159,225,203,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      for (let k = 0; k < KNUCKLE_COUNT; k++) {
+        const a = hand[base + k];
+        const b = hand[base + k + 1];
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.strokeStyle = 'rgba(159,225,203,0.7)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+    hand.forEach((pt, i) => {
+      const r = i === 0 ? 5 : 3;
+      if (effects.glow) {
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, r + 4, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(175,169,236,0.15)';
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = i === 0 ? '#AFA9EC' : '#EEEDFE';
+      ctx.fill();
+    });
+  } else {
+    const palmGrad = ctx.createRadialGradient(cx, cy+30, 2, cx, cy+30, 30);
+    palmGrad.addColorStop(0, 'rgba(175,169,236,0.9)');
+    palmGrad.addColorStop(1, 'rgba(83,74,183,0.3)');
+    ctx.beginPath();
+    ctx.arc(cx, cy + 40, 28, 0, Math.PI * 2);
+    ctx.fillStyle = palmGrad;
+    ctx.fill();
+    for (let f = 0; f < FINGER_COUNT; f++) {
+      const tip = hand[1 + f * (KNUCKLE_COUNT + 1) + KNUCKLE_COUNT];
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#EEEDFE';
+      ctx.fill();
+    }
+  }
+
+  requestAnimationFrame(drawFrame);
+}
+drawFrame();
+</script>

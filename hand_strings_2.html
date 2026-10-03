@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Hand Tracking — Elastic Strings</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; display: flex; flex-direction: column; align-items: center; font-family: sans-serif; min-height: 100vh; }
+  #wrap { position: relative; width: 640px; height: 520px; border-radius: 14px; overflow: hidden; }
+  canvas { display: block; }
+  #status {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 20px; padding: 6px 16px; font-size: 13px;
+    color: rgba(255,255,255,0.7); white-space: nowrap; z-index: 10;
+  }
+  video { display: none; }
+  p { color: rgba(255,255,255,0.3); font-size: 12px; margin-top: 14px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="status">Starting camera…</div>
+  <canvas id="c" width="640" height="520"></canvas>
+  <video id="v" playsinline></video>
+</div>
+<p>Pinch index finger + thumb to pluck the strings. Works with up to 2 hands.</p>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const video = document.getElementById('v');
+const statusEl = document.getElementById('status');
+const W = 640, H = 520;
+
+const COLORS = ['#7F77DD','#1D9E75','#D85A30','#D4537E','#378ADD','#BA7517'];
+const GLOWS =  ['rgba(127,119,221,0.35)','rgba(29,158,117,0.35)','rgba(216,90,48,0.35)','rgba(212,83,126,0.35)','rgba(55,138,221,0.35)','rgba(186,117,23,0.35)'];
+
+let strings = [], particles = [], latestHands = [];
+
+function initStrings() {
+  strings = [];
+  for (let i = 0; i < 6; i++) {
+    const y = 80 + i * 68;
+    strings.push({
+      restY: y, ay: y, by: y, ax: 30, bx: W-30,
+      cps: [],
+      color: COLORS[i], glow: GLOWS[i],
+      thick: 2.8 - i * 0.25,
+      tension: 0.18,
+    });
+  }
+}
+
+function d(x1,y1,x2,y2){return Math.sqrt((x2-x1)**2+(y2-y1)**2);}
+
+function getIndexTip(lm){return {x:(1-lm[8].x)*W, y:lm[8].y*H};}
+function getThumbTip(lm){return {x:(1-lm[4].x)*W, y:lm[4].y*H};}
+function getAllTips(lm){return [4,8,12,16,20].map(i=>({x:(1-lm[i].x)*W, y:lm[i].y*H}));}
+
+function spawnParticles(x, y, color) {
+  for (let i = 0; i < 6; i++) {
+    const a = Math.random()*Math.PI*2, sp = 1.5+Math.random()*3;
+    particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-1,life:1,decay:0.045+Math.random()*0.04,r:2+Math.random()*3,color});
+  }
+}
+
+function catmull(pts, t) {
+  if (pts.length < 2) return;
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 0; i < pts.length-1; i++) {
+    const p0=pts[Math.max(0,i-1)], p1=pts[i], p2=pts[i+1], p3=pts[Math.min(pts.length-1,i+2)];
+    const cp1x=p1.x+(p2.x-p0.x)*t, cp1y=p1.y+(p2.y-p0.y)*t;
+    const cp2x=p2.x-(p3.x-p1.x)*t, cp2y=p2.y-(p3.y-p1.y)*t;
+    ctx.bezierCurveTo(cp1x,cp1y,cp2x,cp2y,p2.x,p2.y);
+  }
+}
+
+function drawString(s) {
+  const pts = [{x:s.ax,y:s.ay}, ...s.cps, {x:s.bx,y:s.by}];
+  ctx.beginPath(); catmull(pts, s.tension);
+  ctx.lineWidth = s.thick+2; ctx.strokeStyle = s.glow; ctx.shadowBlur=0; ctx.stroke();
+  ctx.beginPath(); catmull(pts, s.tension);
+  ctx.lineWidth = s.thick; ctx.strokeStyle = s.color;
+  ctx.shadowBlur=10; ctx.shadowColor=s.color; ctx.stroke();
+  ctx.shadowBlur=0;
+}
+
+function updateStrings() {
+  for (const s of strings) {
+    const grabs = [];
+    for (const hand of latestHands) {
+      const lm = hand.landmarks;
+      const idx = getIndexTip(lm), th = getThumbTip(lm);
+      const pd = d(idx.x,idx.y,th.x,th.y);
+      if (pd < 55) {
+        const px=(idx.x+th.x)/2, py=(idx.y+th.y)/2;
+        if (Math.abs(py-s.restY)<70 && px>s.ax && px<s.bx) {
+          const t=(px-s.ax)/(s.bx-s.ax);
+          grabs.push({x:px,y:py,t});
+          if (Math.random()<0.15) spawnParticles(px,py,s.color);
+        }
+      }
+    }
+
+    const SEG=10;
+    if (grabs.length) {
+      const newCPs=[];
+      for (let i=1;i<SEG;i++) {
+        const t=i/SEG, bx=s.ax+(s.bx-s.ax)*t, by=s.restY;
+        let pull=0;
+        for (const g of grabs) {
+          const infl=Math.exp(-((t-g.t)**2)/0.035);
+          pull+=(g.y-by)*infl*0.92;
+        }
+        newCPs.push({x:bx,y:by+pull,t,vy:0});
+      }
+      s.cps=newCPs;
+    } else {
+      s.cps=s.cps.map(cp=>{
+        const spring=(s.restY-cp.y)*0.22;
+        const vy=((cp.vy||0)*0.72)+spring;
+        return {...cp,y:cp.y+vy,vy};
+      });
+      if (s.cps.length && s.cps.every(cp=>Math.abs(cp.y-s.restY)<0.8)) s.cps=[];
+    }
+  }
+}
+
+function loop() {
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#0a0a0f'; ctx.fillRect(0,0,W,H);
+  for (let i=1;i<5;i++) {
+    ctx.beginPath(); ctx.moveTo(0,i*H/4); ctx.lineTo(W,i*H/4);
+    ctx.strokeStyle='rgba(255,255,255,0.018)'; ctx.lineWidth=1; ctx.stroke();
+  }
+
+  updateStrings();
+  for (const s of strings) drawString(s);
+
+  for (const hand of latestHands) {
+    const lm=hand.landmarks;
+    const tips=getAllTips(lm);
+    for (const ft of tips) {
+      ctx.beginPath(); ctx.arc(ft.x,ft.y,4,0,Math.PI*2);
+      ctx.fillStyle='rgba(255,255,255,0.35)'; ctx.fill();
+    }
+    const idx=getIndexTip(lm), th=getThumbTip(lm);
+    const pd=d(idx.x,idx.y,th.x,th.y);
+    const mx=(idx.x+th.x)/2, my=(idx.y+th.y)/2;
+    ctx.beginPath(); ctx.arc(mx,my,9,0,Math.PI*2);
+    ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fill();
+    if (pd<55) {
+      ctx.beginPath(); ctx.arc(mx,my,16,0,Math.PI*2);
+      ctx.strokeStyle='rgba(255,255,255,0.55)'; ctx.lineWidth=1.5; ctx.stroke();
+    }
+  }
+
+  particles=particles.filter(p=>p.life>0);
+  for (const p of particles) {
+    p.x+=p.vx; p.y+=p.vy; p.vy+=0.12; p.life-=p.decay;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r*p.life,0,Math.PI*2);
+    ctx.fillStyle=p.color+Math.round(p.life*255).toString(16).padStart(2,'0');
+    ctx.fill();
+  }
+
+  ctx.font='11px monospace'; ctx.fillStyle='rgba(255,255,255,0.18)';
+  ctx.fillText('pinch to pluck · up to 2 hands', 16, H-14);
+  requestAnimationFrame(loop);
+}
+
+function onResults(results) {
+  latestHands = results.multiHandLandmarks
+    ? results.multiHandLandmarks.map((lm,i)=>({landmarks:lm}))
+    : [];
+  statusEl.textContent = latestHands.length
+    ? `${latestHands.length} hand${latestHands.length>1?'s':''} detected — pinch to pluck`
+    : 'Show your hands';
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'}});
+    video.srcObject = stream;
+    await video.play();
+    const handsModel = new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+    handsModel.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:0.7,minTrackingConfidence:0.5});
+    handsModel.onResults(onResults);
+    const cam = new Camera(video,{onFrame:async()=>{await handsModel.send({image:video});},width:640,height:480});
+    await cam.start();
+    statusEl.textContent='Show your hands';
+  } catch(e) {
+    statusEl.textContent='Camera unavailable — demo mode active';
+    startDemo();
+  }
+}
+
+function startDemo() {
+  let t=0;
+  function fakeLM(cx,cy) {
+    const lm=Array.from({length:21},()=>({x:0.5,y:0.5,z:0}));
+    const nx=1-cx/W, ny=cy/H;
+    lm[8]={x:nx-0.02,y:ny-0.025,z:0};
+    lm[4]={x:nx+0.02,y:ny+0.025,z:0};
+    [12,16,20].forEach(i=>lm[i]={x:nx,y:ny+0.06,z:0});
+    return lm;
+  }
+  setInterval(()=>{
+    t+=0.022;
+    latestHands=[
+      {landmarks:fakeLM(160+Math.sin(t)*130, 160+Math.sin(t*0.7)*160)},
+      {landmarks:fakeLM(480+Math.sin(t*1.1+1.2)*110, 210+Math.sin(t*0.85+2)*150)}
+    ];
+  },33);
+}
+
+initStrings();
+loop();
+startCamera();
+</script>
+</body>
+</html>
